@@ -1,0 +1,21 @@
+dest,description,owner,review_date
+# Populate this file before enabling the beaconing and DNS tunnelling searches.
+# Without it, those rules are unusable rather than merely noisy.
+# Add both the DESTINATION and note the EXPECTED PROCESS in description --
+# an allowlisted domain contacted by an unexpected process is still suspicious.
+windowsupdate.microsoft.com,Windows Update,Infrastructure,2026-12-31
+update.microsoft.com,Windows Update,Infrastructure,2026-12-31
+ctldl.windowsupdate.com,Certificate trust list,Infrastructure,2026-12-31
+login.microsoftonline.com,Entra ID authentication,Identity,2026-12-31
+graph.microsoft.com,Microsoft Graph,Identity,2026-12-31
+outlook.office365.com,Exchange Online,Messaging,2026-12-31
+teams.microsoft.com,Microsoft Teams,Messaging,2026-12-31
+events.data.microsoft.com,Windows telemetry,Infrastructure,2026-12-31
+winatp-gw-cus.microsoft.com,Defender for Endpoint (expected process: MsSense.exe),SOC,2026-12-31
+wdcp.microsoft.com,Defender cloud protection,SOC,2026-12-31
+clients2.google.com,Chrome update,Infrastructure,2026-12-31
+update.googleapis.com,Chrome update,Infrastructure,2026-12-31
+ocsp.digicert.com,OCSP certificate check,Infrastructure,2026-12-31
+crl.microsoft.com,CRL check,Infrastructure,2026-12-31
+ntp.ubuntu.com,NTP,Infrastructure,2026-12-31
+time.windows.com,NTP,Infrastructure,2026-12-31

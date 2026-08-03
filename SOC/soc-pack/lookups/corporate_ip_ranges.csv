@@ -1,0 +1,9 @@
+cidr,description,site,type
+# Used by nearly every identity and network search to distinguish internal
+# from external. Keep this current -- a stale entry here causes both false
+# positives and missed detections.
+10.0.0.0/8,RFC1918 private,internal,private
+172.16.0.0/12,RFC1918 private,internal,private
+192.168.0.0/16,RFC1918 private,internal,private
+203.0.113.0/24,EXAMPLE - replace with your real egress ranges,HQ,egress
+198.51.100.0/24,EXAMPLE - replace with your VPN egress,VPN,vpn

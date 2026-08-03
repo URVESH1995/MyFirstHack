@@ -1,0 +1,7 @@
+ip,engagement_ref,contact,valid_until
+# Deconfliction list. Add red team / pentest infrastructure for the duration of
+# an engagement, with a hard expiry. If an entry is past valid_until, treat any
+# activity from it as a real incident.
+# Note: deconfliction does NOT mean "do not respond". If you are uncertain,
+# contain first and confirm second -- that is the correct default and the red
+# team should expect it.

@@ -1,0 +1,3 @@
+asn,asn_name,type,notes
+# Your own and your ISPs' ASNs, plus any cloud provider ASN you legitimately
+# egress from. Useful for ASN-level blocking decisions in PB-05.

@@ -1,0 +1,9 @@
+user,justification,owner,review_date
+# Exclusions for the lateral-movement search (Account Authenticating To Excessive Hosts).
+# Without this, vulnerability scanners and backup accounts make that rule pure noise.
+# Every entry needs an owner and a review date. Review quarterly and delete stale rows --
+# a forgotten exclusion is a blind spot an attacker can walk through.
+svc_vulnscan,Vulnerability scanner - authenticates to entire estate by design,Security,2026-12-31
+svc_backup,Backup agent service account,Infrastructure,2026-12-31
+svc_sccm,SCCM client push account,Infrastructure,2026-12-31
+svc_inventory,Asset inventory collector,IT Asset Management,2026-12-31

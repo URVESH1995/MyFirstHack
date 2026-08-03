@@ -1,0 +1,954 @@
+# Response Plans for Splunk ES 8.x Mission Control
+#
+# Structured to match the fields in Security content -> Response plans, so entering
+# these is mechanical data entry rather than a design exercise.
+#
+# HOW TO USE
+#   1. Security content -> Response plans -> Create (or copy the built-in NIST 800-61 plan)
+#   2. Create each `phase` in order
+#   3. Under each phase, create each `task`
+#        name        -> task name
+#        owner_role   -> assign via the Owner drop-down (roles here are suggestions)
+#        description  -> task description
+#        searches     -> add each as an embedded search; analyst runs it with the magnifier
+#        respond      -> attach an adaptive response action or SOAR playbook if you have one
+#        note         -> if `note: required`, set the task to require a note
+#   4. Configure -> Findings and investigations -> create the investigation type
+#   5. Bind the response plan to the investigation type
+#
+# TOKENS
+#   ES supports $token$ substitution for investigation fields (status, urgency,
+#   sensitivity, investigation_id and others). Used below where it helps.
+#   Entity values are NOT reliably available as tokens across versions -- test
+#   $user$ / $dest$ style tokens in your instance before depending on them, and
+#   fall back to a placeholder the analyst edits if they don't resolve.
+#
+# SCOPE OF THIS FILE
+#   PB-01, PB-03 and PB-04 are fully specified -- highest volume and highest stakes.
+#   The remainder give phases and key tasks; fill in from the runbook markdown, which
+#   remains the authoritative source for reasoning, decision trees and trade-offs.
+#   Do not try to enter all 17 at once. Build the 3-4 you run weekly, use them for a
+#   month, then extend.
+#
+# INDEX NAMES in the searches below are the same placeholders as the rest of the pack.
+# Remap them before entering.
+
+---
+
+plan: "PB-01 Phishing / Malicious Email"
+investigation_type: "Phishing"
+source_runbook: "runbooks/runbook-PB01-phishing.md"
+phases:
+
+  - phase: "1. Intake and deduplication"
+    tasks:
+      - name: "Assign and record the reporting details"
+        owner_role: "L1 Analyst"
+        description: >
+          Assign this investigation to yourself. Capture: reporting user UPN, NetworkMessageId,
+          sender address, sender display name, subject, received time (state the timezone).
+        note: required
+
+      - name: "Check for an existing investigation for this campaign"
+        owner_role: "L1 Analyst"
+        description: >
+          A campaign is one incident with many recipients. Same sender infrastructure, same
+          payload URL/hash, or same lure with rotating senders = one campaign. If an open
+          investigation exists, add this recipient to it and close this one as a duplicate.
+        searches:
+          - name: "Recent phishing findings"
+            query: |
+              index=notable earliest=-7d search_name="Phishing*"
+              | table _time, search_name, rule_title, user, src_user, orig_sid
+              | sort - _time
+
+  - phase: "2. Verify the verdict"
+    tasks:
+      - name: "Pull the message and read the authentication results"
+        owner_role: "L1 Analyst"
+        description: >
+          Defender -> Email & collaboration -> Explorer -> filter Network Message ID ->
+          open the Email entity page -> Analysis tab. Read SPF/DKIM/DMARC, composite
+          authentication, Return-Path vs From, display name vs actual address.
+          DMARC pass does NOT mean legitimate -- attackers pass DMARC on their own
+          look-alike domains. Check domain registration age.
+        note: required
+
+      - name: "Assess the payload"
+        owner_role: "L1 Analyst"
+        description: >
+          URLs: check reputation, do not browse from a corporate host.
+          Attachments: record SHA256, do not open.
+          QR codes: decode in an analysis VM -- MDO may not extract these, and a body
+          that is a single image with little text is a strong quishing signal.
+          No payload at all + a request for money/gift cards/bank detail changes = BEC,
+          jump to phase 6.
+
+      - name: "Rule out simulation and red team"
+        owner_role: "L1 Analyst"
+        description: >
+          Cross-reference the sender against phishing_simulation_senders.csv and the active
+          engagement register. If it is a simulation, close as Benign True Positive and
+          thank the reporter -- never discourage reporting.
+        searches:
+          - name: "Is the sender a known simulation source"
+            query: |
+              | inputlookup phishing_simulation_senders.csv
+              | search sender_domain="*PLACEHOLDER-SENDER-DOMAIN*"
+
+  - phase: "3. Scope the campaign"
+    tasks:
+      - name: "Establish full delivery scope"
+        owner_role: "L1 Analyst"
+        description: >
+          Run in Defender Advanced Hunting (query in runbook section 5.1). Read DeliveryLocation:
+          Inbox/folder = delivered, Quarantine/Junk = filtered, Failed/Dropped = blocked.
+          Widen the search on subject and payload URL, not just sender -- attackers rotate.
+          Record the delivered count; it sets the priority.
+        note: required
+
+      - name: "Identify who clicked"
+        owner_role: "L1 Analyst"
+        description: >
+          UrlClickEvents in Defender (runbook 5.2). IsClickedThrough=1 means they bypassed
+          the warning -- treat as full exposure. IMPORTANT: no row does not mean no click.
+          Safe Links only logs rewritten URLs, so plain-text links, image links and QR codes
+          are invisible here. Always corroborate with proxy and DNS.
+        searches:
+          - name: "Proxy corroboration"
+            query: |
+              index=proxy earliest=-30d
+                (dest_host="PLACEHOLDER-DOMAIN" OR url="*PLACEHOLDER-DOMAIN*")
+              | stats count min(_time) as first_seen max(_time) as last_seen
+                      values(action) as actions dc(url) as unique_urls by src_ip, user
+              | convert ctime(first_seen) ctime(last_seen)
+              | sort - count
+          - name: "DNS corroboration (catches proxy-blocked clicks)"
+            query: |
+              index=dns earliest=-30d query="*PLACEHOLDER-DOMAIN*"
+              | stats count min(_time) as first_seen by src_ip, query, answer
+              | convert ctime(first_seen)
+
+      - name: "Determine whether credentials were submitted"
+        owner_role: "L2 Analyst"
+        description: >
+          There is no log that says "user typed password into attacker page". You infer it
+          from a successful sign-in from attacker infrastructure shortly after the click.
+          Indicators: singleFactorAuthentication on an MFA user, hosting-provider ASN, one
+          session ID from two IPs, new device registered.
+          MFA does NOT stop adversary-in-the-middle kits -- they steal the session token.
+          If you cannot rule it out, treat it as submitted.
+        searches:
+          - name: "Sign-in activity for the clicker"
+            query: |
+              index=azure_ad sourcetype="azure:aad:signin" earliest=-30d
+                userPrincipalName="PLACEHOLDER-UPN"
+              | lookup corporate_ip_ranges.csv cidr as ipAddress OUTPUT description as corp_site
+              | eval src_type=if(isnull(corp_site),"external","corporate")
+              | stats count min(_time) as first max(_time) as last
+                      values(appDisplayName) as apps
+                      by ipAddress, src_type, location.countryOrRegion, userAgent,
+                         authenticationRequirement, conditionalAccessStatus
+              | convert ctime(first) ctime(last)
+              | sort first
+        note: required
+
+  - phase: "4. Contain"
+    tasks:
+      - name: "Purge the message from all mailboxes"
+        owner_role: "L1 Analyst"
+        description: >
+          Defender -> Explorer -> filter -> select all -> Take action.
+          Options: Move to Junk (lowest impact) / Move to Deleted Items (standard) /
+          Soft delete (default for confirmed malicious) / Hard delete (UNRECOVERABLE,
+          requires SOC Lead approval and a litigation-hold check).
+          Verify the filter result count matches your phase 3 scope before acting.
+          Purge is asynchronous -- confirm completion in Action center -> History before
+          reporting containment complete.
+        respond: "SOAR playbook: mdo_purge_message (if available)"
+        note: required
+
+      - name: "Block the indicators"
+        owner_role: "L1 Analyst"
+        description: >
+          Tenant Allow/Block List: sender domain (not just the address), payload URL, file hash.
+          Defender Indicators: hash and URL/IP set to Block and remediate, generate alert Yes.
+          Network: proxy, DNS and firewall.
+        respond: "SOAR playbook: block_ioc_multi (if available)"
+
+      - name: "Contain the identity — only if credentials were submitted"
+        owner_role: "L2 Analyst"
+        description: >
+          Skip if phase 3 ruled out credential submission.
+          Order matters: revoke sessions FIRST, then reset the password. Revocation kills
+          stolen tokens; a password reset alone does not.
+          Script: Invoke-IdentityContainment.ps1 -UserPrincipalName <upn> -RevokeSessions
+          -CollectEvidence -Ticket $investigation_id$
+          Then hand off to the PB-04 response plan.
+        respond: "SOAR playbook: entra_revoke_sessions (if available)"
+
+      - name: "Contain the endpoint — only if an attachment executed"
+        owner_role: "L2 Analyst"
+        description: >
+          Collect the investigation package BEFORE isolating.
+          Script: defender_response.py collect --device <host> --comment $investigation_id$
+          then defender_response.py isolate --device <host> --type Full
+          Then hand off to the PB-02 response plan.
+        respond: "SOAR playbook: mde_isolate_device (if available)"
+
+  - phase: "5. Notify"
+    tasks:
+      - name: "Notify recipients who did not interact"
+        owner_role: "L1 Analyst"
+        description: >
+          Template in runbook section 10.1. Include an explicit invitation to come forward
+          if they did click -- make it consequence-free. Under-reporting costs more than
+          over-reporting.
+
+      - name: "Call any compromised user — do not email"
+        owner_role: "L2 Analyst"
+        description: >
+          Their mailbox may be attacker-read or attacker-filtered. Phone script in runbook
+          section 10.2. Lead with "you have not done anything wrong". Ask: did you enter
+          your password anywhere unusual, approve a prompt you did not start, notice missing
+          emails? Their answer often finds what the queries missed.
+        note: required
+
+      - name: "Thank the reporter"
+        owner_role: "L1 Analyst"
+        description: >
+          Including when it turns out to be a false positive. Template in section 10.3.
+
+  - phase: "6. BEC / internal spread — only if the account sent mail"
+    tasks:
+      - name: "Check outbound mail from the compromised account"
+        owner_role: "L2 Analyst"
+        description: >
+          Runbook section 7. Purge internal recipients. External recipients create
+          notified-party obligations -- escalate to SOC Lead, Legal and Comms.
+          Check for thread hijacking (replies inside legitimate threads).
+        note: required
+
+      - name: "Check for payment or vendor detail change requests"
+        owner_role: "SOC Lead"
+        description: >
+          This is where actual money is lost. If any exist, phone Finance immediately --
+          do not email -- and freeze the relevant payments. Escalate to P1.
+        note: required
+
+  - phase: "7. Verify and close"
+    tasks:
+      - name: "Confirm removal"
+        owner_role: "L1 Analyst"
+        description: >
+          Re-run the phase 3 scope query and confirm zero rows with
+          DeliveryLocation="Inbox/folder". Confirm Action center shows all purge actions
+          completed, not pending. Check quarantine for pending release requests and deny them.
+        note: required
+
+      - name: "Verify identity containment held"
+        owner_role: "L2 Analyst"
+        description: >
+          Only if the identity was contained. Run at 1h, 4h and 24h. Expect failures only.
+          Continued success means you missed a persistence mechanism -- go back to OAuth
+          grants, app passwords and registered devices.
+        searches:
+          - name: "Post-containment authentication check"
+            query: |
+              index=azure_ad sourcetype="azure:aad:signin" earliest=-24h
+                userPrincipalName="PLACEHOLDER-UPN"
+              | table _time, ipAddress, appDisplayName, status.errorCode,
+                      status.failureReason, authenticationRequirement
+              | sort _time
+
+      - name: "Create a detection for the IoCs and submit to Microsoft"
+        owner_role: "L1 Analyst"
+        description: >
+          Schedule a 15-minute alert on the IoCs to catch late clickers.
+          Submit the message to Microsoft: Actions & submissions -> Submissions.
+
+      - name: "Record the close-out facts"
+        owner_role: "L1 Analyst"
+        description: >
+          Initial access vector, scope (X delivered / Y clicked / Z compromised), containment
+          actions, root cause, follow-up records raised. If the vector is unknown, say so
+          explicitly -- do not imply you found it.
+        note: required
+
+---
+
+plan: "PB-03 Ransomware"
+investigation_type: "Ransomware"
+source_runbook: "runbooks/runbooks-endpoint.md"
+phases:
+
+  - phase: "1. First 15 minutes — parallel, not sequential"
+    tasks:
+      - name: "Isolate every affected device"
+        owner_role: "L2 Analyst"
+        description: >
+          Defender incident -> select all devices -> Isolate. Or:
+          defender_response.py isolate-bulk --file hosts.txt --type Full
+          DO NOT POWER OFF -- memory may hold keys. Network isolation only.
+        respond: "SOAR playbook: mde_isolate_bulk (if available)"
+        note: required
+
+      - name: "Protect backups"
+        owner_role: "Infrastructure"
+        description: >
+          Verify immutability / air-gap. If in doubt, disconnect the backup network.
+          Attackers target backups before encrypting. This task is as urgent as isolation.
+        note: required
+
+      - name: "Disable compromised accounts"
+        owner_role: "Identity Admin"
+        description: >
+          Invoke-IdentityContainment.ps1 -UserPrincipalName <upn> -RevokeSessions -BlockSignIn
+
+      - name: "Open the crisis bridge and start the timeline"
+        owner_role: "SOC Lead"
+        description: >
+          SOC Lead, CISO, Infrastructure, Legal, Comms, Backup owner. One named person owns
+          a running timeline in this investigation. Not optional at P1.
+        note: required
+
+  - phase: "2. Scope"
+    tasks:
+      - name: "Find the encryption start time"
+        owner_role: "L2 Analyst"
+        description: >
+          Shadow copy deletion is usually the earliest reliable signal. The earliest row is
+          close to encryption start -- work backwards from it to find initial access.
+        searches:
+          - name: "Recovery destruction findings"
+            query: |
+              index=notable earliest=-3d search_name="Endpoint - Volume Shadow Copy Deletion*"
+              | table _time, dest, user, rule_title
+              | sort _time
+          - name: "File share blast radius"
+            query: |
+              index=wineventlog (EventCode=5145 OR EventCode=4663) earliest=-2d
+              | stats dc(Object_Name) as objects_touched values(Accesses) as access_types
+                      min(_time) as firstTime max(_time) as lastTime
+                      by Account_Name, Source_Address, host
+              | where objects_touched > 500
+              | convert ctime(firstTime) ctime(lastTime)
+              | sort - objects_touched
+        note: required
+
+      - name: "Build the full host list, including staged-but-not-yet-encrypted"
+        owner_role: "L2 Analyst"
+        description: >
+          Every host the encrypting account touched in 14 days is potentially staged.
+          Isolate those too. Runbook Q3.5.
+        note: required
+
+      - name: "Determine whether data was exfiltrated before encryption"
+        owner_role: "L2 Analyst"
+        description: >
+          Assume yes until disproven. rclone with a remote config, or mass archive creation
+          before the encryption timestamp, means exfiltration. This changes an availability
+          incident into a data breach with notification obligations.
+        searches:
+          - name: "Large outbound flows"
+            query: |
+              index=proxy OR index=firewall earliest=-30d
+              | stats sum(bytes_out) as bytes_out by src_ip, dest_ip, dest_host
+              | eval GB=round(bytes_out/1024/1024/1024,2)
+              | where GB > 5
+              | sort - GB
+        note: required
+
+  - phase: "3. Find initial access — do not start recovery without this"
+    tasks:
+      - name: "Work the five initial-access hunts"
+        owner_role: "L2 Analyst"
+        description: >
+          Exposed RDP/VPN without MFA, anomalous VPN auth, phishing to loader, edge device
+          exploitation, unauthorized RMM. Runbook Q3.6.
+          DWELL TIME IS USUALLY 3-30 DAYS. A 48-hour window finds the encryption and misses
+          the intrusion.
+        note: required
+
+      - name: "Assess tier-0 involvement"
+        owner_role: "SOC Lead"
+        description: >
+          DC, ADFS/Entra Connect, PKI, backup server, jump box, PAM vault, hypervisor
+          management, EDR console, SIEM. If any are affected this is full domain compromise:
+          plan AD recovery, not host recovery, and engage the IR retainer.
+          Do NOT use domain admin credentials to investigate -- you will expose them.
+        note: required
+
+  - phase: "4. Eradicate and recover — strict order"
+    tasks:
+      - name: "Close the initial access vector"
+        owner_role: "Infrastructure"
+        description: "Before any recovery. Recovering into an un-remediated environment is the most common cause of a second event."
+        note: required
+      - name: "Rotate all privileged credentials"
+        owner_role: "Identity Admin"
+        description: >
+          If AD compromised: all Domain Admins, service accounts, DSRM, Entra Connect sync
+          account, backup service accounts, and KRBTGT twice.
+          KRBTGT is MANUAL, PLANNED, TWO-STAGE with the required interval. Do not script it.
+        note: required
+      - name: "Rebuild tier-0 from known-good media"
+        owner_role: "Infrastructure"
+        description: "Never clean a compromised domain controller."
+      - name: "Rebuild affected hosts, then restore data"
+        owner_role: "Infrastructure"
+        description: "Scan restored data before reconnecting -- backups may contain the loader."
+      - name: "Staged reconnection with monitoring between stages"
+        owner_role: "SOC Lead"
+        description: "Identity -> core infra -> business-critical apps -> general fleet."
+      - name: "Deploy a canary before declaring recovery"
+        owner_role: "L2 Analyst"
+        description: "File-share honeypot with a mass-modification alert. If it fires, you are not clean."
+        note: required
+
+  - phase: "5. Obligations and review"
+    tasks:
+      - name: "Brief Legal with the exfiltration findings"
+        owner_role: "SOC Lead"
+        description: >
+          Six facts: what data, how much, whose, when, where to, how you know.
+          State confidence honestly. "No evidence of exfiltration" and "no exfiltration
+          occurred" are different claims. Legal owns the regulatory clock.
+        note: required
+      - name: "Track regulatory and notification clocks as tasks with due dates"
+        owner_role: "Legal"
+      - name: "Schedule the Post Incident Review"
+        owner_role: "SOC Lead"
+        description: "Mandatory for P1."
+
+---
+
+plan: "PB-04 Account Compromise"
+investigation_type: "Account Compromise"
+source_runbook: "runbooks/runbooks-identity.md"
+phases:
+
+  - phase: "1. Contain first"
+    tasks:
+      - name: "Revoke sessions and collect evidence"
+        owner_role: "L2 Analyst"
+        description: >
+          Invoke-IdentityContainment.ps1 -UserPrincipalName <upn> -RevokeSessions
+          -CollectEvidence -Ticket $investigation_id$
+          Revoke BEFORE reset. AiTM kits steal the session token, not the password.
+          Note that access tokens can remain valid for roughly an hour on apps without
+          Continuous Access Evaluation -- verify in phase 4, do not assume instant.
+        respond: "SOAR playbook: entra_revoke_sessions (if available)"
+        note: required
+
+      - name: "Reset the password out-of-band"
+        owner_role: "L2 Analyst"
+        description: >
+          Manual, deliberately. Phone a known number or deliver in person. Never email --
+          the mailbox may be attacker-controlled.
+        note: required
+
+  - phase: "2. Hunt all four persistence classes"
+    tasks:
+      - name: "Inbox rules and forwarding"
+        owner_role: "L2 Analyst"
+        description: >
+          Screenshot before deleting -- the rule keywords show attacker intent.
+          Any forwarding/deleting rule = HUMAN OPERATOR. Escalate to P1.
+          Check mailbox-level forwarding separately from rules; they are different settings.
+        searches:
+          - name: "Mailbox operations audit"
+            query: |
+              index=o365 sourcetype="o365:management:activity" earliest=-30d
+                UserId="PLACEHOLDER-UPN"
+                Operation IN ("New-InboxRule","Set-InboxRule","UpdateInboxRules",
+                  "Add-MailboxPermission","Add-RecipientPermission","Set-Mailbox",
+                  "Consent to application","Add OAuth2PermissionGrant","Add member to role",
+                  "New-MailboxExportRequest","Set-CASMailbox")
+              | table _time, UserId, Operation, ClientIP, ObjectId, Parameters, ResultStatus
+              | sort _time
+        note: required
+
+      - name: "MFA methods registered during the compromise window"
+        owner_role: "Identity Admin"
+        description: "Entra -> Users -> Authentication methods. Delete attacker-registered methods, force re-registration."
+        note: required
+
+      - name: "OAuth grants"
+        owner_role: "L2 Analyst"
+        description: >
+          THIS IS THE ONE MOST OFTEN MISSED. An illicit consent grant survives both password
+          reset and session revocation. If you skip it you are not contained.
+          High-risk scopes: Mail.ReadWrite, Mail.Send, Files.ReadWrite.All, offline_access,
+          Directory.ReadWrite.All.
+          The evidence file from Invoke-IdentityContainment.ps1 flags these. Revocation is
+          manual and deliberate -- review the scopes before deleting an enterprise app.
+        note: required
+
+      - name: "Delegations and registered devices"
+        owner_role: "L2 Analyst"
+        description: "Mailbox permissions, send-as, folder permissions, Entra device objects."
+
+  - phase: "3. Assess impact"
+    tasks:
+      - name: "Data accessed"
+        owner_role: "L2 Analyst"
+        description: "Runbook Q4.5. Several hundred unique files from a non-corporate IP -> PB-10 and Legal."
+      - name: "Mail sent from the account"
+        owner_role: "L2 Analyst"
+        description: "-> PB-01 phase 6. Check for payment detail change requests and phone Finance if found."
+      - name: "Other victims of the same attacker infrastructure"
+        owner_role: "L2 Analyst"
+        description: "Pivot on the ASN, not just the IP -- attackers rotate within a hosting provider."
+        searches:
+          - name: "Other accounts hit from the same source"
+            query: |
+              index=azure_ad sourcetype="azure:aad:signin" earliest=-30d
+                ipAddress IN ("PLACEHOLDER-IP")
+              | eval outcome=if('status.errorCode'==0,"SUCCESS","failure")
+              | stats count by userPrincipalName, outcome, appDisplayName
+              | sort - outcome, - count
+      - name: "Privileged role audit — only if the account holds admin roles"
+        owner_role: "SOC Lead"
+        description: "Review every action taken under the identity. Assume anything it could reach is compromised. -> PB-09."
+
+  - phase: "4. Verify containment held"
+    tasks:
+      - name: "Post-containment check at 1h, 4h and 24h"
+        owner_role: "L2 Analyst"
+        description: >
+          Continued successful authentication after revocation means a missed persistence
+          mechanism -- return to phase 2, specifically OAuth grants, app passwords and
+          registered devices.
+        searches:
+          - name: "Authentication from attacker infrastructure"
+            query: |
+              index=azure_ad sourcetype="azure:aad:signin" earliest=-24h
+                userPrincipalName="PLACEHOLDER-UPN" ipAddress IN ("PLACEHOLDER-IP")
+              | table _time, ipAddress, appDisplayName, status.errorCode, status.failureReason
+              | sort _time
+        note: required
+      - name: "Check password reuse"
+        owner_role: "L1 Analyst"
+        description: "VPN, local admin, SaaS, personal accounts. Rotate anywhere the same password was used."
+      - name: "Set up 30-day enhanced monitoring"
+        owner_role: "L2 Analyst"
+
+---
+
+# ---------------------------------------------------------------------------
+# REMAINING PLANS — phases and key tasks. Expand from the runbook markdown.
+# ---------------------------------------------------------------------------
+
+plan: "PB-02 Malware"
+investigation_type: "Malware"
+phases:
+  - phase: "1. Establish execution status"
+    tasks:
+      - name: "Prevented vs Detected vs Remediated"
+        description: >
+          THE branch point. "Remediated" means it RAN and was cleaned afterwards.
+          Do not treat it as "never executed" -- that is the single most common triage error.
+        note: required
+  - phase: "2. Classify and scope"
+    tasks:
+      - name: "Identify the delivery vector from the parent process chain"
+      - name: "Sweep the hash fleet-wide"
+      - name: "Determine malware class — drives credential rotation scope"
+        description: "Infostealer = all browser-saved credentials gone. Credential dumper = all cached domain creds. Loader = ransomware precursor, hunt lateral movement now."
+        note: required
+  - phase: "3. Contain"
+    tasks:
+      - name: "Collect investigation package BEFORE isolating"
+      - name: "Isolate — Full / Selective / Restrict app execution / documented risk acceptance"
+      - name: "Block hash and C2 indicators"
+  - phase: "4. Eradicate"
+    tasks:
+      - name: "Sweep all four persistence classes"
+        description: "Registry autoruns, scheduled tasks and services, WMI event subscriptions, startup folder."
+      - name: "Check for EDR tampering"
+        description: "Any hit = reimage. Cleaning a host with tampered EDR is not defensible."
+      - name: "Reimage-or-clean decision, with reasoning recorded"
+        note: required
+      - name: "Rotate credentials per the malware-class table"
+        note: required
+  - phase: "5. Verify"
+    tasks:
+      - name: "Clean scan, no C2 for 24h, persistence removed, then release from isolation"
+      - name: "7-day enhanced monitoring"
+
+---
+
+plan: "PB-05 Brute Force / Password Spray / MFA Fatigue"
+investigation_type: "Credential Attack"
+phases:
+  - phase: "1. Classify"
+    tasks:
+      - name: "Internal or external source?"
+        description: "An INTERNAL source is more serious -- a compromised host or a misconfigured service account. -> PB-02 / PB-08."
+        note: required
+      - name: "Spray vs targeted brute force vs credential stuffing vs enumeration"
+  - phase: "2. The only question that changes priority"
+    tasks:
+      - name: "Any success from the source, its /24, or its ASN?"
+        description: "-> PB-04 immediately if yes."
+        note: required
+      - name: "Identify accounts where the password was CORRECT but MFA held"
+        description: >
+          Error codes 50076 / 50079. The most under-triaged signal in this playbook.
+          Those passwords are exposed -- reset them even though the attack failed.
+        searches:
+          - name: "MFA-saved accounts"
+            query: |
+              index=azure_ad sourcetype="azure:aad:signin" earliest=-24h
+                ipAddress IN ("PLACEHOLDER-IP") "status.errorCode" IN (50076, 50079, 50074, 500121, 53003)
+              | stats count values("status.errorCode") as codes by userPrincipalName
+        note: required
+  - phase: "3. Contain and fix"
+    tasks:
+      - name: "Block at the most durable layer available"
+      - name: "Produce the MFA-coverage gap list and raise it as a Change"
+        description: "This is the real deliverable of a spray incident. If it produced no Change or Problem record, you treated the symptom."
+        note: required
+
+---
+
+plan: "PB-06 Command and Control"
+investigation_type: "Command and Control"
+phases:
+  - phase: "1. Identify the initiating process"
+    tasks:
+      - name: "Attribute the traffic to a process"
+        description: >
+          A signed Microsoft binary beaconing out = process injection = P1 and plan to reimage.
+          Unknown binary in a user-writable path = ordinary malware.
+          No attribution = unmanaged device; that is a visibility gap as well as an incident.
+        note: required
+  - phase: "2. Scope and classify"
+    tasks:
+      - name: "Classify the traffic pattern"
+        description: "Low-jitter periodic = beacon. High outbound / low inbound = exfiltration, go to PB-10. Traffic to Slack/Discord/Telegram/GitHub = living-off-trusted-sites, containment must be host-level."
+      - name: "Run the 90-day scope query"
+        description: "The earliest firstTime is your best estimate of intrusion start, usually much earlier than the alert."
+        note: required
+      - name: "Pivot the infrastructure"
+        description: "Same IP other domains, same TLS cert, adjacent /24. Attackers reuse infrastructure; this frequently finds hosts you did not know were compromised."
+  - phase: "3. Contain in the right order"
+    tasks:
+      - name: "Isolate the host BEFORE blocking the domain"
+        description: "Block first and the operator notices, then may burn the host or deploy ransomware."
+        note: required
+      - name: "Then block at endpoint, proxy, DNS and firewall"
+      - name: "Consider sinkholing instead, to find other infected hosts quietly"
+
+---
+
+plan: "PB-07 LOLBin / Suspicious Scripting"
+investigation_type: "Suspicious Activity"
+phases:
+  - phase: "1. Decode before you decide"
+    tasks:
+      - name: "Decode the payload in an isolated VM"
+        description: "Do not escalate or close an encoded-command alert without decoding it. Reading is safe; executing is not."
+        note: required
+  - phase: "2. Judge intent from the decoded content"
+    tasks:
+      - name: "Categorise: download-and-execute / injection / credential access / recon / defence evasion / legitimate admin"
+        description: "Defence evasion (AMSI bypass, ETW patching, AV exclusions, log clearing) = P1 and reimage. Ambiguous = escalate to L2, never close."
+        note: required
+      - name: "Verify any claimed admin activity out-of-band, against a ticket"
+  - phase: "3. Contain and tune"
+    tasks:
+      - name: "Contain per PB-02"
+      - name: "Add exclusions by signed script path AND parent process — never by process name alone"
+        description: "Never exclude powershell.exe broadly. Every exclusion needs an owner, a justification and a review date."
+
+---
+
+plan: "PB-08 Lateral Movement"
+investigation_type: "Lateral Movement"
+phases:
+  - phase: "1. Build the full host list before touching anything"
+    tasks:
+      - name: "Enumerate every host the account touched, both directions, 30 days"
+        description: "Isolate SIMULTANEOUSLY, not sequentially. Sequential isolation gives the operator time to relocate."
+        note: required
+      - name: "Bulk isolate"
+        description: "defender_response.py isolate-bulk --file affected_hosts.txt --type Full"
+        respond: "SOAR playbook: mde_isolate_bulk (if available)"
+  - phase: "2. Assess reach"
+    tasks:
+      - name: "Tier-0 involvement — definitive yes/no with evidence"
+        description: "If yes: full domain compromise posture, IR retainer, AD recovery planning. Do not investigate using privileged credentials."
+        note: required
+      - name: "Identify the technique — determines rotation scope"
+      - name: "Assess the objective: backups (-> PB-03), shares (-> PB-10), or DCs"
+  - phase: "3. Rotate — all five categories"
+    tasks:
+      - name: "Compromised accounts, all cached accounts on every touched host, local admin, service accounts, and tier-0 if applicable"
+        description: "Contain first, then rotate. Rotating while the attacker still has access just hands them the new credentials."
+        note: required
+  - phase: "4. Verify and fix"
+    tasks:
+      - name: "Establish the reconnaissance timeline for the true intrusion start"
+      - name: "Raise LAPS, segmentation and NTLM findings as Changes"
+
+---
+
+plan: "PB-09 Privilege Escalation"
+investigation_type: "Privilege Escalation"
+phases:
+  - phase: "1. Two questions"
+    tasks:
+      - name: "Is there a matching change record that authorises THIS grant to THIS person by THIS actor?"
+        note: required
+      - name: "Did the actor have the authority to make it?"
+        description: "If not, the actor's account is likely compromised -> PB-04, and audit everything they did. A service principal making role grants is a strong compromise signal and easy to miss."
+        note: required
+  - phase: "2. Check the other escalation paths"
+    tasks:
+      - name: "DCSync, Kerberoasting, AdminSDHolder/ACL changes, GPO modification, golden ticket indicators"
+        description: "DCSync = full credential database at risk, KRBTGT reset required."
+  - phase: "3. Contain"
+    tasks:
+      - name: "Capture evidence, then reverse the grant"
+        description: "Reversing before you understand scope can tip off the attacker."
+      - name: "Reconcile all tier-0 group memberships against the approved list"
+        note: required
+  - phase: "4. Prevent"
+    tasks:
+      - name: "Raise PIM/JIT, approval workflow, or standing-privilege removal as a Change"
+        description: "Every PB-09 should produce at least one of these. That is the actual value of the playbook."
+        note: required
+
+---
+
+plan: "PB-10 Data Exfiltration / Insider Threat"
+investigation_type: "Data Loss"
+phases:
+  - phase: "0. AUTHORIZATION GATE"
+    tasks:
+      - name: "Obtain and record authorization before investigating a named employee"
+        description: >
+          HARD STOP. Record who authorized, their role, and the date.
+          You may always respond to a technical alert, contain a data flow and preserve
+          evidence. Targeted investigation of an individual needs authorization.
+          Does not apply if this is an external attacker on a compromised account.
+        note: required
+  - phase: "1. Preserve before you contain"
+    tasks:
+      - name: "Legal hold, retention hold, endpoint package, device retention"
+        description: "Coordinate with IT asset management immediately -- the standard offboarding wipe destroys your evidence."
+        note: required
+      - name: "Start chain of custody"
+        note: required
+  - phase: "2. Establish the facts"
+    tasks:
+      - name: "Classify the data — categories and volume, gaps stated explicitly"
+        note: required
+      - name: "Baseline against the person's own 180-day history"
+        description: "A z-score above 3 against their own baseline is a stronger and fairer finding than a raw threshold. 2 GB may be a normal Tuesday for a video editor."
+      - name: "Check every channel: cloud, email, USB, print, personal device sync, code repos"
+  - phase: "3. Report"
+    tasks:
+      - name: "Give Legal the six facts"
+        description: >
+          What data, how much, whose, when, where to, how you know -- with confidence levels
+          and limitations stated. Do NOT write conclusions about intent or motive; the
+          investigation record may be disclosed in employment proceedings.
+        note: required
+
+---
+
+plan: "PB-11 Web Application Attack"
+investigation_type: "Web Application Attack"
+phases:
+  - phase: "1. Did it succeed?"
+    tasks:
+      - name: "Triage outcome, not volume"
+        description: "Attempts are constant background noise. A 200 on an attack path, an oversized response, or a new URL path are success indicators."
+        note: required
+      - name: "Check server-side: did the web server process spawn a shell?"
+        description: "Confirmed compromise. P1. No further debate."
+        note: required
+  - phase: "2. Scope"
+    tasks:
+      - name: "Scanner or targeted human?"
+        description: "Few paths, low rate, browser-like UA over hours = targeted human, more dangerous than a high-volume scanner."
+      - name: "Find every webshell by diffing against the deployment baseline"
+        description: "Including code appended to legitimate files -- a file-creation query alone will miss those."
+        note: required
+      - name: "If SSRF was possible, check for cloud metadata access"
+        description: "A 200 to 169.254.169.254 means cloud credentials were stolen -> PB-14."
+  - phase: "3. Contain and rotate"
+    tasks:
+      - name: "Remove the node from the load balancer, in preference to isolating it"
+      - name: "Rotate every secret on or reachable from the host"
+        description: "Including JWT/session signing keys -- an attacker with those can forge sessions indefinitely, and this one is very commonly missed."
+        note: required
+
+---
+
+plan: "PB-12 Vulnerability Exploitation"
+investigation_type: "Vulnerability"
+phases:
+  - phase: "1. Confirm and assess exposure"
+    tasks:
+      - name: "Confirm you are actually vulnerable, including the configuration precondition"
+      - name: "Assess internet exposure and KEV / active-exploitation status"
+  - phase: "2. Compromise assessment BEFORE patching"
+    tasks:
+      - name: "Search for exploitation back to the earliest date the vulnerability existed"
+        description: "Not 7 days. Edge-device vulnerabilities are often exploited weeks before disclosure."
+        note: required
+      - name: "For appliances with no EDR: follow vendor guidance, diff config against known-good"
+        description: "Patching a compromised appliance leaves the implant. Rebuild instead."
+        note: required
+  - phase: "3. Remediate and verify"
+    tasks:
+      - name: "Patch, or apply a compensating control ranked by effectiveness"
+      - name: "Verify by retesting the exploit condition, not by checking the version number"
+        note: required
+
+---
+
+plan: "PB-13 Denial of Service"
+investigation_type: "Denial of Service"
+phases:
+  - phase: "1. Is it actually an attack?"
+    tasks:
+      - name: "Distinguish attack from capacity, bad deploy or dependency failure"
+        description: "Roughly half of suspected DDoS is not an attack. Normal request rate with rising 5xx = not an attack; route to Ops and reclassify honestly."
+        note: required
+      - name: "Classify the layer"
+        description: "L3/L4 volumetric cannot be mitigated on your own edge -- the pipe is full. Engage the ISP or scrubbing provider immediately."
+  - phase: "2. MANDATORY smokescreen check"
+    tasks:
+      - name: "Check for concurrent intrusion while everyone watches the traffic graph"
+        description: "DDoS is used as cover. Two minutes of work. Document that you ran it."
+        searches:
+          - name: "Concurrent suspicious authentication"
+            query: |
+              index=azure_ad sourcetype="azure:aad:signin" earliest=-4h "status.errorCode"=0
+              | lookup corporate_ip_ranges.csv cidr as ipAddress OUTPUT description as corp_site
+              | where isnull(corp_site)
+              | stats count values(appDisplayName) as apps
+                      by userPrincipalName, ipAddress, location.countryOrRegion
+              | sort - count
+          - name: "Concurrent data egress"
+            query: |
+              index=proxy earliest=-4h
+              | stats sum(bytes_out) as bytes_out by user, dest_host
+              | eval GB=round(bytes_out/1024/1024/1024,2)
+              | where GB > 1
+              | sort - GB
+        note: required
+  - phase: "3. Mitigate and communicate"
+    tasks:
+      - name: "Apply mitigation appropriate to the layer"
+      - name: "Status page within 15 minutes of confirmed customer impact"
+        description: "Do not publish attack specifics or mitigation detail while the attack is live -- the attacker reads your status page."
+
+---
+
+plan: "PB-14 Cloud / SaaS Misconfiguration"
+investigation_type: "Cloud Misconfiguration"
+phases:
+  - phase: "1. Categorise and assess"
+    tasks:
+      - name: "Exposure / identity / resource abuse / data"
+      - name: "For exposure: WAS IT ACCESSED?"
+        description: >
+          If diagnostic logging was not enabled you CANNOT answer this. Say "logging was not
+          enabled, access cannot be determined" rather than implying no access occurred --
+          and make the logging gap the priority finding.
+        note: required
+      - name: "For identity: check for added service principal credentials"
+        description: "A secret added to an existing app is persistence that survives every user-focused containment action. Check it on every cloud incident."
+        note: required
+  - phase: "2. Contain and find the leak"
+    tasks:
+      - name: "Revert, rotate all exposed credentials including SAS tokens and SP secrets"
+      - name: "Identify how the credential leaked"
+        description: "Committed to a repo, client-side JS, exposed in a log, phished, CI/CD artifact, or SSRF from instance metadata."
+  - phase: "3. Prevent"
+    tasks:
+      - name: "Raise a policy-as-code guardrail Change"
+        description: "Fixing one bucket without fixing the policy that allowed it is not closure. Every PB-14 produces a guardrail Change."
+        note: required
+
+---
+
+plan: "PB-15 Unauthorized RMM"
+investigation_type: "Unauthorized Software"
+phases:
+  - phase: "1. Verify out-of-band"
+    tasks:
+      - name: "Can a named person, contacted OUT-OF-BAND, explain it?"
+        description: "Out-of-band matters -- if the account is compromised, an email or Teams 'yes that was me' may be the attacker. Rate this P2 suspected intrusion, not P4 shadow IT, until explained."
+        note: required
+  - phase: "2. Determine how it got there"
+    tasks:
+      - name: "User-installed, silently installed, or pushed remotely?"
+        description: "SYSTEM with no interactive session = pushed. wmiprvse/psexesvc parent = remote push -> PB-08."
+      - name: "Is there an active session right now?"
+        description: "Sustained bidirectional traffic = a human on the box. P1, isolate immediately."
+        note: required
+  - phase: "3. Evidence and containment"
+    tasks:
+      - name: "Collect connection logs BEFORE removal"
+        description: "AnyDesk connection_trace.txt gives the incoming peer ID -- attributable evidence for Legal."
+        note: required
+      - name: "Block the RMM domains estate-wide, add hash indicator, raise an app-control Change"
+
+---
+
+plan: "PB-16 Lost or Stolen Device"
+investigation_type: "Lost or Stolen Device"
+phases:
+  - phase: "1. Establish encryption status with evidence"
+    tasks:
+      - name: "Evidence encryption, do not assume it"
+        description: >
+          "Policy applied" is not "encryption confirmed enabled on that volume at that time".
+          Attach the recovery-key escrow record or Intune report. This is the single most
+          important artifact for the breach determination.
+        note: required
+      - name: "Check for post-loss activity"
+        description: "Any device check-in or authentication after the reported loss time means someone is using it. P1, treat as active intrusion -> PB-04."
+        note: required
+  - phase: "2. Respond"
+    tasks:
+      - name: "Revoke sessions, reset password, issue remote wipe, disable the device object"
+      - name: "Rotate certificates, SSH keys, tokens, and the BitLocker recovery key"
+      - name: "Brief Legal with the encryption evidence for the notification determination"
+        note: required
+
+---
+
+plan: "PB-17 Third Party / Supply Chain"
+investigation_type: "Third Party Compromise"
+phases:
+  - phase: "1. Enumerate the exposure"
+    tasks:
+      - name: "Work all 14 access categories"
+        description: "Do this enumeration as a project BEFORE an incident. Under time pressure at P1 is how things get missed."
+        note: required
+  - phase: "2. Suspend everything at once"
+    tasks:
+      - name: "All vendor accounts, tunnels, service accounts, OAuth consents, SFTP, badges"
+        description: "Before you finish investigating. Vendor downtime is cheaper than a domain compromise. Tell the vendor you have done it."
+        note: required
+      - name: "Rotate every shared secret, including anything the vendor could have stored"
+  - phase: "3. Hunt and manage the vendor"
+    tasks:
+      - name: "Hunt activity over a window WIDER than the vendor's stated one"
+        description: "Vendors routinely revise timelines outward."
+        note: required
+      - name: "Obtain written, dated specifics"
+        description: "Do not restore access on assurance alone. Require evidence: their IR report, confirmed credential rotation, remediation status. Name the person who makes the restoration decision."
+        note: required
+  - phase: "4. Widen"
+    tasks:
+      - name: "Check every other vendor using the same platform or product"
+        description: "Supply chain incidents rarely affect one relationship."

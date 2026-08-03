@@ -1,0 +1,37 @@
+process_name,tool_name,approved,notes
+anydesk.exe,AnyDesk,false,Very common in ransomware intrusions - verify with a named human out-of-band
+teamviewer.exe,TeamViewer,false,Set approved=true and record host scope if this is your sanctioned tool
+tvnserver.exe,TightVNC,false,
+screenconnect.clientservice.exe,ConnectWise ScreenConnect,false,Heavily abused by ransomware affiliates
+connectwisecontrol.client.exe,ConnectWise Control,false,
+atera.exe,Atera,false,Frequently abused - legitimate MSP tool
+syncro.exe,Syncro,false,
+splashtop.exe,Splashtop,false,
+srmanager.exe,Splashtop Streamer,false,
+rustdesk.exe,RustDesk,false,Open source - common in intrusions
+ngrok.exe,ngrok,false,Tunnelling - almost never legitimate on a corporate endpoint
+cloudflared.exe,Cloudflare Tunnel,false,Tunnelling - check for trycloudflare.com destinations
+localtonet.exe,LocalToNet,false,Tunnelling
+gotohttp.exe,GotoHTTP,false,
+remoteutilities.exe,Remote Utilities,false,
+supremo.exe,Supremo,false,
+ammyy.exe,Ammyy Admin,false,Long history of abuse
+aa_v3.exe,Ammyy Admin,false,
+dwagent.exe,DWService,false,
+mesh.exe,MeshCentral,false,
+meshagent.exe,MeshCentral Agent,false,
+logmein.exe,LogMeIn,false,
+lmiguardiansvc.exe,LogMeIn Guardian,false,
+chrome_remote_desktop.exe,Chrome Remote Desktop,false,
+dameware.exe,DameWare,false,
+radmin.exe,Radmin,false,
+pcvisit.exe,pcvisit,false,
+zoho_assist.exe,Zoho Assist,false,
+fixme.it.exe,FixMe.IT,false,
+rclone.exe,rclone,false,Strongest single indicator of deliberate bulk exfiltration
+psexec.exe,PsExec,false,Dual-use - baseline your admin usage then set approved
+paexec.exe,PAExec,false,
+advanced_ip_scanner.exe,Advanced IP Scanner,false,Recon tool used by both IT and intruders
+netscan.exe,SoftPerfect NetScan,false,
+softperfect.exe,SoftPerfect,false,
+mimikatz.exe,Mimikatz,false,Never approve

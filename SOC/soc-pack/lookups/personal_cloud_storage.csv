@@ -1,0 +1,42 @@
+domain,service,sanctioned,notes
+dropbox.com,Dropbox,false,Set sanctioned=true if this is your corporate tool
+www.dropbox.com,Dropbox,false,
+dl.dropboxusercontent.com,Dropbox,false,
+mega.nz,MEGA,false,Frequently used for exfiltration
+mega.co.nz,MEGA,false,
+wetransfer.com,WeTransfer,false,
+we.tl,WeTransfer,false,
+pcloud.com,pCloud,false,
+sync.com,Sync.com,false,
+box.com,Box,false,
+icedrive.net,Icedrive,false,
+mediafire.com,MediaFire,false,
+sendspace.com,SendSpace,false,
+file.io,file.io,false,Ephemeral - popular for exfil
+anonfiles.com,AnonFiles,false,
+gofile.io,Gofile,false,
+transfer.sh,transfer.sh,false,
+temp.sh,temp.sh,false,
+catbox.moe,Catbox,false,
+0x0.st,0x0.st,false,
+bashupload.com,bashupload,false,
+drive.google.com,Google Drive,false,Set sanctioned=true if Workspace is corporate
+docs.google.com,Google Docs,false,
+onedrive.live.com,OneDrive Personal,false,Distinct from corporate OneDrive - keep false
+1drv.ms,OneDrive Personal,false,
+storage.googleapis.com,Google Cloud Storage,false,
+s3.amazonaws.com,AWS S3,false,Often a legitimate destination - review before enabling
+pastebin.com,Pastebin,false,Also used as a C2 channel
+paste.ee,Paste.ee,false,
+ghostbin.com,Ghostbin,false,
+hastebin.com,Hastebin,false,
+privatebin.net,PrivateBin,false,
+termbin.com,termbin,false,
+telegram.org,Telegram,false,Exfil and C2 channel
+api.telegram.org,Telegram Bot API,false,Common C2 - investigate any hit
+discord.com,Discord,false,Webhooks used for exfil and C2
+cdn.discordapp.com,Discord CDN,false,Very common malware hosting
+github.com,GitHub,false,Set sanctioned=true if used for development
+gist.github.com,GitHub Gist,false,Used for C2 and exfil
+gitlab.com,GitLab,false,
+bitbucket.org,Bitbucket,false,

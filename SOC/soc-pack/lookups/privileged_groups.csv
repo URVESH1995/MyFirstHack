@@ -1,0 +1,31 @@
+group_name,tier,platform,notes
+Domain Admins,0,AD,Full domain control
+Enterprise Admins,0,AD,Full forest control
+Schema Admins,0,AD,
+Administrators,0,AD,Built-in local/domain administrators
+Account Operators,0,AD,Can modify most accounts - often overlooked as tier-0
+Backup Operators,0,AD,Can read/write any file - effectively tier-0
+Server Operators,0,AD,
+Print Operators,0,AD,Historically a privilege escalation path
+Group Policy Creator Owners,0,AD,GPO = domain-wide code execution
+DnsAdmins,0,AD,Known escalation path to DC code execution
+Cert Publishers,0,AD,PKI abuse path
+Key Admins,0,AD,
+Enterprise Key Admins,0,AD,
+Global Administrator,0,Entra,Full tenant control
+Privileged Role Administrator,0,Entra,Can grant any role - equivalent to Global Admin
+Privileged Authentication Administrator,0,Entra,Can reset Global Admin credentials
+Application Administrator,0,Entra,Can add credentials to any app - privilege escalation path
+Cloud Application Administrator,0,Entra,Same escalation path as Application Administrator
+Hybrid Identity Administrator,0,Entra,Controls sync - on-prem to cloud pivot
+Partner Tier2 Support,0,Entra,Rarely needed - high privilege
+Exchange Administrator,1,Entra,
+SharePoint Administrator,1,Entra,
+Intune Administrator,1,Entra,Device management = code execution on endpoints
+Security Administrator,1,Entra,
+Conditional Access Administrator,1,Entra,Can weaken access controls
+User Administrator,1,Entra,
+Authentication Administrator,1,Entra,
+Helpdesk Administrator,1,Entra,
+Billing Administrator,2,Entra,
+Reports Reader,2,Entra,

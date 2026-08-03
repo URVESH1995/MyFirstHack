@@ -1,0 +1,6 @@
+sender_domain,platform,notes,review_date
+# Populate from your security awareness platform's sending infrastructure.
+# Without this, every simulation campaign generates a real incident and burns
+# analyst time. Ask your awareness team for their current sender list and
+# refresh it whenever they change providers or add domains.
+example-awareness-sim.com,PLACEHOLDER - replace with your provider,Remove this row,2026-12-31
